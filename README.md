@@ -1,21 +1,17 @@
 # SpaceUtilizer
 
-_TODO: one line on what this project does and who it's for._
+A **macOS command-line tool for analysing disk-space usage** — it scans
+directories and reports what's taking up space, helping you find large files and
+folders to clean up. Written in Swift as a Swift Package Manager executable.
 
-**Stack:** Shell scripts
+## Stack
+Swift · Swift Package Manager · macOS 13+
 
-## Project structure
-
-```
-Package.swift
-Sources/
-push_to_github.sh
+## Getting started
+```bash
+swift build -c release
+swift run SpaceUtilizer           # or run the built binary in .build/release
 ```
 
 ## Notes
-
-_TODO: anything a new user should know — configuration, env vars, known limitations._
-
----
-
-_README scaffolded by readme_gen. Edit the TODOs to finish it._
+- Requires the Swift toolchain (Xcode or Swift for macOS).
