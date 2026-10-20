@@ -9,15 +9,17 @@ enum DetailTab: String, CaseIterable {
 struct AppDetailView: View {
     @ObservedObject var app: AppInfo
     let scanner: AppScanner
+    let projectScanner: ProjectScanner
     let onDeleted: () -> Void
 
-    @State private var showDeleteAppAlert = false
-    @State private var showDeleteAllAlert = false
+    @State private var uninstallMode: UninstallMode?
     @State private var errorText: String?
-    @State private var isDeleting = false
     @State private var selectedTab: DetailTab = .overview
 
-    var associatedTotal: Int64 { app.associatedFiles.reduce(0) { $0 + $1.size } }
+    var associatedTotal: Int64 { app.associatedFiles.reduce(0) { $0 + max($1.size, 0) } }
+
+    /// What each removal option frees with its default selection.
+    func freed(_ mode: UninstallMode) -> Int64 { app.size(of: app.defaultSelection(for: mode)) }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -57,17 +59,25 @@ struct AppDetailView: View {
         }
         .background(Color(NSColor.windowBackgroundColor))
         .navigationTitle(app.name)
-        .alert("Move \"\(app.name)\" to Trash?", isPresented: $showDeleteAppAlert) {
-            Button("Move to Trash", role: .destructive) { doDeleteApp() }
-            Button("Cancel", role: .cancel) {}
-        } message: {
-            Text("Only the .app bundle (\(formatBytes(app.appSize))) will be moved to Trash. Associated files will remain.")
-        }
-        .alert("Move \"\(app.name)\" + All Files to Trash?", isPresented: $showDeleteAllAlert) {
-            Button("Move All to Trash", role: .destructive) { doDeleteAll() }
-            Button("Cancel", role: .cancel) {}
-        } message: {
-            Text("The app and all \(app.associatedFiles.count) associated files (\(formatBytes(app.totalSize)) total) will be moved to Trash.")
+        .sheet(item: $uninstallMode) { mode in
+            UninstallSheet(
+                target: app,
+                initialMode: mode,
+                context: UsageContext.make(apps: scanner.apps, projects: projectScanner.projects,
+                                           excludingApps: [app.id], excludingProject: nil),
+                scanner: scanner,
+                onFinished: { trashed in
+                    uninstallMode = nil
+                    if trashed.contains(app.path) {
+                        onDeleted()
+                    } else {
+                        // Partial removal — drop whatever is gone from the lists
+                        app.associatedFiles.removeAll { trashed.contains($0.path) }
+                        app.dataFolders.removeAll { trashed.contains($0.path) }
+                    }
+                },
+                onCancel: { uninstallMode = nil }
+            )
         }
     }
 
@@ -241,6 +251,12 @@ struct AppDetailView: View {
                         StorageRow(label: cat.rawValue, size: catSize, color: cat.color, total: app.totalSize)
                     }
                 }
+                ForEach([DataKind.appData, .userContent, .sharedLibrary], id: \.self) { kind in
+                    let kindSize = app.dataFolders.filter { $0.kind == kind }.reduce(0) { $0 + max($1.size, 0) }
+                    if kindSize > 0 {
+                        StorageRow(label: kind.title, size: kindSize, color: kind.color, total: app.totalSize)
+                    }
+                }
             }
             .padding(12)
             .background(Color(NSColor.controlBackgroundColor))
@@ -301,17 +317,19 @@ struct AppDetailView: View {
                 Label("Data & Downloads", systemImage: "externaldrive.fill")
                     .font(.headline)
                 Spacer()
-                Text(formatBytes(app.dataFolders.reduce(0) { $0 + $1.size }))
+                Text(formatBytes(app.dataFolders.reduce(0) { $0 + max($1.size, 0) }))
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
 
-            Text("Files stored outside the app bundle — models, caches, databases, and other large data this app manages separately.")
+            Text("Files stored outside the app bundle — models, caches, databases, and other large data this app manages separately. Deleting only the app leaves all of this behind.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
 
             ForEach(app.dataFolders) { folder in
-                DataFolderRow(folder: folder, scanner: scanner)
+                DataFolderRow(folder: folder, scanner: scanner) {
+                    app.dataFolders.removeAll { $0.id == folder.id }
+                }
             }
         }
     }
@@ -323,36 +341,35 @@ struct AppDetailView: View {
             Text("Remove")
                 .font(.headline)
 
-            if isDeleting {
-                HStack(spacing: 10) {
-                    ProgressView().controlSize(.small)
-                    Text("Moving to Trash…")
-                        .font(.subheadline)
-                        .foregroundStyle(.secondary)
-                }
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(.vertical, 4)
-            }
-
-            HStack(spacing: 12) {
+            VStack(spacing: 8) {
                 DeleteCard(
                     title: "App Only",
-                    subtitle: "Keeps preferences & data",
-                    sizeLabel: formatBytes(app.appSize) + " freed",
+                    subtitle: "Keeps settings, models & data",
+                    sizeLabel: "~" + formatBytes(freed(.appOnly)) + " freed",
                     color: .orange,
-                    icon: "trash",
-                    disabled: isDeleting
-                ) { showDeleteAppAlert = true }
+                    icon: "trash"
+                ) { uninstallMode = .appOnly }
 
                 DeleteCard(
-                    title: "App + All Files",
-                    subtitle: "Complete removal",
-                    sizeLabel: formatBytes(app.totalSize) + " freed",
+                    title: "Keep Models & Data",
+                    subtitle: "Removes app, settings & caches",
+                    sizeLabel: "~" + formatBytes(freed(.keepData)) + " freed",
+                    color: .purple,
+                    icon: "cube.transparent"
+                ) { uninstallMode = .keepData }
+
+                DeleteCard(
+                    title: "Uninstall Completely",
+                    subtitle: "App, settings, models & data",
+                    sizeLabel: "~" + formatBytes(freed(.everything)) + " freed",
                     color: .red,
-                    icon: "trash.fill",
-                    disabled: isDeleting
-                ) { showDeleteAllAlert = true }
+                    icon: "trash.fill"
+                ) { uninstallMode = .everything }
             }
+
+            Text("Before anything is deleted you'll see every file, and anything other apps or your projects still use is left unticked.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
 
             if let err = errorText {
                 Label(err, systemImage: "exclamationmark.triangle.fill")
@@ -370,30 +387,6 @@ struct AppDetailView: View {
                 errorText = error.localizedDescription
             } else {
                 scanner.removeAssociatedFile(file, from: app)
-            }
-        }
-    }
-
-    private func doDeleteApp() {
-        isDeleting = true
-        scanner.moveToTrash(app.path) { error in
-            isDeleting = false
-            if let error {
-                errorText = error.localizedDescription
-            } else {
-                onDeleted()
-            }
-        }
-    }
-
-    private func doDeleteAll() {
-        isDeleting = true
-        scanner.deleteAppCompletely(app) { error in
-            isDeleting = false
-            if let error {
-                errorText = error.localizedDescription
-            } else {
-                onDeleted()
             }
         }
     }
@@ -566,6 +559,7 @@ struct BrowseLocationSection: View {
 struct DataFolderRow: View {
     let folder: DataFolder
     let scanner: AppScanner
+    var onTrashed: () -> Void = {}
     @State private var isExpanded = false
     @State private var showTrashConfirm = false
 
@@ -583,14 +577,22 @@ struct DataFolderRow: View {
                 }
                 .buttonStyle(.plain)
 
-                Image(systemName: "externaldrive.fill")
-                    .foregroundStyle(.purple)
+                Image(systemName: folder.kind.systemImage)
+                    .foregroundStyle(folder.kind.color)
                     .frame(width: 18)
 
                 VStack(alignment: .leading, spacing: 2) {
                     HStack(spacing: 6) {
                         Text(folder.label)
                             .font(.system(size: 13, weight: .semibold))
+                        if folder.kind != .appData {
+                            Text(folder.kind == .userContent ? "Your content" : "Shared")
+                                .font(.caption2)
+                                .padding(.horizontal, 5).padding(.vertical, 2)
+                                .background(folder.kind.color.opacity(0.15))
+                                .foregroundStyle(folder.kind.color)
+                                .clipShape(Capsule())
+                        }
                         if folder.size > 1_073_741_824 {
                             Text("Large")
                                 .font(.caption2)
@@ -652,7 +654,9 @@ struct DataFolderRow: View {
             titleVisibility: .visible
         ) {
             Button("Move to Trash", role: .destructive) {
-                scanner.moveToTrash(folder.path) { _ in }
+                scanner.moveToTrash(folder.path) { error in
+                    if error == nil { onTrashed() }
+                }
             }
             Button("Cancel", role: .cancel) {}
         } message: {

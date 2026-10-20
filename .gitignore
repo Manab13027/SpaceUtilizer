@@ -36,3 +36,6 @@ Thumbs.db
 
 # Logs
 *.log
+
+# App build output
+dist/

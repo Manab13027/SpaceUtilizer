@@ -31,9 +31,9 @@ final class AppInfo: ObservableObject, Identifiable, Hashable {
     }
 
     var totalSize: Int64 {
-        let assoc = associatedFiles.reduce(0) { $0 + max($1.size, 0) }
-        let data  = dataFolders.reduce(0)    { $0 + max($1.size, 0) }
-        return appSize + assoc + data
+        // Nested folders (e.g. Docker's VM folder inside its container) are counted once.
+        let extras = topLevelItems(uninstallItems.filter { $0.group != .application })
+        return appSize + extras.reduce(0) { $0 + max($1.size, 0) }
     }
 
     var installLocation: String {
@@ -48,11 +48,57 @@ final class AppInfo: ObservableObject, Identifiable, Hashable {
 
 // MARK: - DataFolder
 
+/// How a data folder relates to the app — decides whether "Uninstall Completely"
+/// selects it by default.
+enum DataKind: String {
+    /// Data that only this app uses: models, caches, VMs it created, downloads. Removed by default.
+    case appData
+    /// Things you made or synced (recordings, archives, cloud-synced files). Kept by default.
+    case userContent
+    /// SDKs, package caches and libraries other tools also rely on (Android SDK, Gradle, Homebrew). Kept by default.
+    case sharedLibrary
+
+    var title: String {
+        switch self {
+        case .appData:       return "App Data & Models"
+        case .userContent:   return "Your Content"
+        case .sharedLibrary: return "Shared Libraries & SDKs"
+        }
+    }
+
+    var explanation: String {
+        switch self {
+        case .appData:       return "Downloaded models, caches and data only this app uses. Useless once the app is gone."
+        case .userContent:   return "Files you created or synced. Kept unless you tick them."
+        case .sharedLibrary: return "Libraries, SDKs and package caches other tools may still need. Kept unless you tick them."
+        }
+    }
+
+    var color: Color {
+        switch self {
+        case .appData:       return .purple
+        case .userContent:   return .teal
+        case .sharedLibrary: return .gray
+        }
+    }
+
+    var systemImage: String {
+        switch self {
+        case .appData:       return "externaldrive.fill"
+        case .userContent:   return "person.crop.square.fill"
+        case .sharedLibrary: return "books.vertical.fill"
+        }
+    }
+
+    var selectedByDefault: Bool { self == .appData }
+}
+
 struct DataFolder: Identifiable {
     let id = UUID()
     let label: String
     let path: URL
     let description: String
+    var kind: DataKind = .appData
     // -1 means "not yet computed" — size is calculated lazily off-main-thread
     var size: Int64
 
@@ -119,21 +165,6 @@ final class FileBrowserNode: ObservableObject, Identifiable {
             }
         }
     }
-}
-
-private func computeSize(_ url: URL) -> Int64 {
-    guard let enumerator = FileManager.default.enumerator(
-        at: url,
-        includingPropertiesForKeys: [.fileSizeKey, .isRegularFileKey],
-        options: [.skipsHiddenFiles]
-    ) else { return 0 }
-    var total: Int64 = 0
-    for case let f as URL in enumerator {
-        guard let v = try? f.resourceValues(forKeys: [.fileSizeKey, .isRegularFileKey]),
-              v.isRegularFile == true, let sz = v.fileSize else { continue }
-        total += Int64(sz)
-    }
-    return total
 }
 
 // MARK: - AssociatedFile

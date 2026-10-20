@@ -7,9 +7,17 @@ enum SortOption: String, CaseIterable {
     case lastUsed  = "Last Used"
 }
 
+enum SidebarMode: String, CaseIterable {
+    case apps = "Applications"
+    case projects = "Projects"
+}
+
 struct ContentView: View {
     @StateObject private var scanner = AppScanner()
+    @StateObject private var projectScanner = ProjectScanner()
+    @State private var sidebarMode: SidebarMode = .apps
     @State private var selectedApp: AppInfo?
+    @State private var selectedProject: ProjectInfo?
     @State private var sortBy: SortOption = .totalSize
     @State private var searchText = ""
     @State private var diskInfo: DiskInfo? = DiskInfo.load()
@@ -28,6 +36,20 @@ struct ContentView: View {
         return list
     }
 
+    var displayedProjects: [ProjectInfo] {
+        var list = projectScanner.projects
+        if !searchText.isEmpty {
+            list = list.filter { $0.name.localizedCaseInsensitiveContains(searchText) }
+        }
+        switch sortBy {
+        case .totalSize: list.sort { $0.totalSize > $1.totalSize }
+        case .appSize:   list.sort { $0.folderSize > $1.folderSize }
+        case .name:      list.sort { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+        case .lastUsed:  list.sort { ($0.lastModified ?? .distantPast) > ($1.lastModified ?? .distantPast) }
+        }
+        return list
+    }
+
     var body: some View {
         NavigationSplitView {
             VStack(spacing: 0) {
@@ -35,24 +57,42 @@ struct ContentView: View {
                     DiskSpaceBanner(disk: disk)
                     Divider()
                 }
-                if !scanner.apps.isEmpty {
-                    summaryHeader
+                Picker("", selection: $sidebarMode) {
+                    ForEach(SidebarMode.allCases, id: \.self) { Text($0.rawValue).tag($0) }
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+                .padding(.horizontal, 12)
+                .padding(.vertical, 8)
+                Divider()
+
+                if sidebarMode == .apps {
+                    if !scanner.apps.isEmpty {
+                        summaryHeader
+                        Divider()
+                    }
+                    if scanner.isScanning {
+                        scanProgress
+                        Divider()
+                    }
+                    List(displayedApps, selection: $selectedApp) { app in
+                        AppRowView(app: app).tag(app)
+                    }
+                    .listStyle(.sidebar)
+                } else {
+                    projectRootsHeader
                     Divider()
+                    List(displayedProjects, selection: $selectedProject) { project in
+                        ProjectRowView(project: project).tag(project)
+                    }
+                    .listStyle(.sidebar)
                 }
-                if scanner.isScanning {
-                    scanProgress
-                    Divider()
-                }
-                List(displayedApps, selection: $selectedApp) { app in
-                    AppRowView(app: app).tag(app)
-                }
-                .listStyle(.sidebar)
-                .searchable(text: $searchText, placement: .sidebar, prompt: "Search")
             }
-            .navigationTitle("Applications")
+            .searchable(text: $searchText, placement: .sidebar, prompt: "Search")
+            .navigationTitle(sidebarMode.rawValue)
             .toolbar {
                 ToolbarItem(placement: .primaryAction) {
-                    Button { scanner.scan() } label: {
+                    Button { scanner.scan(); projectScanner.scan() } label: {
                         Label("Scan", systemImage: "arrow.clockwise")
                     }
                     .disabled(scanner.isScanning)
@@ -77,24 +117,101 @@ struct ContentView: View {
                 }
             }
         } detail: {
-            if let app = selectedApp {
-                AppDetailView(app: app, scanner: scanner) {
+            if sidebarMode == .apps, let app = selectedApp {
+                AppDetailView(app: app, scanner: scanner, projectScanner: projectScanner) {
                     scanner.removeApp(app)
                     selectedApp = nil
+                    diskInfo = DiskInfo.load()
                 }
                 .id(app.id)
                 .onAppear { scanner.computeSizesIfNeeded(for: app) }
+            } else if sidebarMode == .projects, let project = selectedProject {
+                ProjectDetailView(project: project, projectScanner: projectScanner, appScanner: scanner) {
+                    selectedProject = nil
+                    diskInfo = DiskInfo.load()
+                }
+                .id(project.id)
+                .onAppear { projectScanner.loadDetails(project, appScanner: scanner) }
+            } else if sidebarMode == .projects {
+                projectsPlaceholder
             } else {
                 placeholderView
             }
         }
         .onAppear {
             scanner.scan()
+            projectScanner.scan()
             diskInfo = DiskInfo.load()
         }
     }
 
     // MARK: - Subviews
+
+    private var projectRootsHeader: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack {
+                Text("Project Folders").font(.caption.bold())
+                Spacer()
+                if projectScanner.isScanning { ProgressView().controlSize(.mini) }
+                Button { addProjectRoot() } label: { Image(systemName: "plus") }
+                    .buttonStyle(.borderless)
+                    .help("Add a folder that contains your projects")
+            }
+            if projectScanner.roots.isEmpty {
+                Text("Add the folder where you keep your projects.")
+                    .font(.caption2).foregroundStyle(.secondary)
+            }
+            ForEach(projectScanner.roots, id: \.self) { root in
+                HStack(spacing: 4) {
+                    Image(systemName: "folder.fill").foregroundStyle(.blue)
+                    Text(tildePath(root.path)).lineLimit(1).truncationMode(.middle)
+                    Spacer()
+                    Button { projectScanner.removeRoot(root) } label: {
+                        Image(systemName: "minus.circle").foregroundStyle(.secondary)
+                    }
+                    .buttonStyle(.borderless)
+                    .help("Stop showing projects from this folder (nothing is deleted)")
+                }
+                .font(.caption)
+            }
+            Text("\(projectScanner.projects.count) projects")
+                .font(.caption2).foregroundStyle(.secondary)
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+    }
+
+    private func addProjectRoot() {
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.allowsMultipleSelection = true
+        panel.prompt = "Add"
+        panel.message = "Choose the folder(s) where you keep your projects"
+        if panel.runModal() == .OK {
+            projectScanner.addRoots(panel.urls)
+        }
+    }
+
+    private var projectsPlaceholder: some View {
+        VStack(spacing: 14) {
+            Image(systemName: "hammer.circle.fill")
+                .font(.system(size: 48))
+                .foregroundStyle(.indigo.opacity(0.7))
+            if projectScanner.roots.isEmpty {
+                Text("Add the folder where you keep your projects").font(.title3)
+                Button("Add Folder…") { addProjectRoot() }
+                    .buttonStyle(.borderedProminent)
+            } else {
+                Text("Select a project to see what it uses and remove it")
+                    .font(.title3)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .padding(32)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(Color(NSColor.windowBackgroundColor))
+    }
 
     private var summaryHeader: some View {
         HStack {
